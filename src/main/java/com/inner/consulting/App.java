@@ -39,7 +39,8 @@ import java.util.Properties;
 public class App {
 
 
-
+    private static String pipelineMessage = null;
+    private static String jobMessage = null;
 
 
     public static void main(String[] args) {
@@ -53,27 +54,33 @@ public class App {
 
         // Crear el consumidor
         KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+        consumer.subscribe(Arrays.asList("topic-pipeline", "topic-job"));
 
-        // Suscribirse al tema (topic)
-        consumer.subscribe(Collections.singletonList("topic-job"));
-        //consumer.subscribe(Collections.singletonList("topic-job"));
-
-        // Suscribirse a los temas (topics) especificados
-        //consumer.subscribe(Arrays.asList("topic-pipeline", "topic-job"));
-
-
-        // Bucle para recibir mensajes
-        while (true) {
-            ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
-            for (ConsumerRecord<String, String> record : records) {
-                System.out.printf("Mensaje recibido: %s%n", record.value());
-                ejecutarPipeline(record.value());
+        try {
+            while (true) {
+               ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+                for (ConsumerRecord<String, String> record : records) {
+                    System.out.printf("Mensaje recibido de topic %s: %s%n", record.topic(), record.value());
+                    if (record.topic().equals("topic-pipeline")) {
+                        pipelineMessage = record.value();
+                    } else if (record.topic().equals("topic-job")) {
+                        jobMessage = record.value();
+                    }
+                    if (pipelineMessage != null && jobMessage != null) {
+                        ejecutarPipeline(pipelineMessage, jobMessage);
+                        // Reiniciar los mensajes
+                        pipelineMessage = null;
+                        jobMessage = null;
+                    }
+                }
             }
-
+        } finally {
+            consumer.close();
         }
     }
 
-    private static void ejecutarPipeline(String ocrResult) {
+
+    private static void ejecutarPipeline(String ocrResult,String empleadorId) {
         try {
             Pipeline pipeline = Pipeline.create();
             BatchStage<AbstractMap.SimpleEntry<String, String>> jsonEntries = pipeline
@@ -92,8 +99,8 @@ public class App {
                         if (json.charAt(json.length() - 1) == ',') {
                             json.deleteCharAt(json.length() - 1);
                         }
-                       // UUID messageIdJson = empleadorId;
-                        UUID messageIdJson = UUID.randomUUID();
+                        String messageIdJson = empleadorId;
+                       // UUID messageIdJson = UUID.randomUUID();
                         System.out.print(messageIdJson);
                         json.append(String.format(",\"Id solicitud\":\"%s\"", messageIdJson.toString()));
                         json.append("}");
