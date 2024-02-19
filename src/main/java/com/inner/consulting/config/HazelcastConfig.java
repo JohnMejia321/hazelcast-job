@@ -8,7 +8,7 @@ public class HazelcastConfig {
 
     public static HazelcastInstance hazelcastClient() {
         ClientConfig clientConfig = new ClientConfig();
-        clientConfig.setClusterName("cluster-prueba");
+      //  clientConfig.setClusterName("cluster-prueba");
         return HazelcastClient.newHazelcastClient(clientConfig);
     }
 }

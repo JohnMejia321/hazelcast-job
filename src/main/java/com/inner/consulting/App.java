@@ -1,5 +1,8 @@
 package com.inner.consulting;
+import com.hazelcast.client.HazelcastClient;
 import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.map.IMap;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -7,67 +10,66 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
 
-import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.jet.Jet;
-import com.hazelcast.jet.JetInstance;
-import com.hazelcast.jet.config.JobConfig;
-import com.hazelcast.jet.pipeline.BatchStage;
-import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.jet.pipeline.Sources;
-
-
-
-import com.hazelcast.config.Config;
+import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.kafka.KafkaSinks;
-
-
 import org.apache.kafka.common.serialization.StringSerializer;
-
 
 import java.util.AbstractMap;
 import java.util.Properties;
-import java.util.UUID;
 import java.util.logging.Logger;
-
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Properties;
 
 public class App {
-
-
     private static String pipelineMessage = null;
     private static String jobMessage = null;
 
-
     public static void main(String[] args) {
-        // Configuración de propiedades del consumidor
-        Properties props = new Properties();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "my-consumer-group");
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"); // Para leer desde el inicio
+        // Configuración de propiedades del consumidor Kafka
+        Properties kafkaProps = new Properties();
+        kafkaProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        kafkaProps.put(ConsumerConfig.GROUP_ID_CONFIG, "my-consumer-group");
+        kafkaProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        kafkaProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        kafkaProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"); // Para leer desde el inicio
 
-        // Crear el consumidor
-        KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<>(kafkaProps);
         consumer.subscribe(Arrays.asList("topic-pipeline", "topic-job"));
+
+        ClientConfig clientConfig = new ClientConfig();
+        HazelcastInstance hazelcastInstance = HazelcastClient.newHazelcastClient(clientConfig);
+        IMap<String, String> hazelcastMap = hazelcastInstance.getMap("myMap");
 
         try {
             while (true) {
-               ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+                ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
                 for (ConsumerRecord<String, String> record : records) {
                     System.out.printf("Mensaje recibido de topic %s: %s%n", record.topic(), record.value());
+
+                    String currentMessage = record.value();
+
+                    // Asegúrate de que los mensajes se estén procesando correctamente
                     if (record.topic().equals("topic-pipeline")) {
-                        pipelineMessage = record.value();
+                        pipelineMessage = currentMessage;
                     } else if (record.topic().equals("topic-job")) {
-                        jobMessage = record.value();
+                        jobMessage = currentMessage;
                     }
+
                     if (pipelineMessage != null && jobMessage != null) {
-                        ejecutarPipeline(pipelineMessage, jobMessage);
+                        try {
+                            // Ejecutar el pipeline para enviar a Kafka
+                            ejecutarPipeline(pipelineMessage, jobMessage);
+                            hazelcastMap.put(jobMessage, pipelineMessage);
+                            System.out.println("Mensaje agregado al mapa de Hazelcast: " + currentMessage);
+                        } catch (Exception e) {
+                            // Manejar cualquier excepción que pueda ocurrir al agregar mensajes al mapa
+                            System.err.println("Error al agregar mensaje al mapa de Hazelcast: " + e.getMessage());
+                            e.printStackTrace();
+                        }
                         // Reiniciar los mensajes
                         pipelineMessage = null;
                         jobMessage = null;
@@ -79,12 +81,10 @@ public class App {
         }
     }
 
-
-    private static void ejecutarPipeline(String ocrResult,String empleadorId) {
+    private static void ejecutarPipeline(String pipelineMsg, String jobId) {
         try {
             Pipeline pipeline = Pipeline.create();
-            BatchStage<AbstractMap.SimpleEntry<String, String>> jsonEntries = pipeline
-                    .readFrom(Sources.<String>list("sourceList"))
+            pipeline.readFrom(Sources.<String>list("sourceList"))
                     .map(entry -> {
                         String[] parts = entry.split("\n");
                         StringBuilder json = new StringBuilder("{");
@@ -99,42 +99,19 @@ public class App {
                         if (json.charAt(json.length() - 1) == ',') {
                             json.deleteCharAt(json.length() - 1);
                         }
-                        String messageIdJson = empleadorId;
-                       // UUID messageIdJson = UUID.randomUUID();
-                        System.out.print(messageIdJson);
-                        json.append(String.format(",\"Id solicitud\":\"%s\"", messageIdJson.toString()));
+                        String messageIdJson = jobId;
+                        json.append(String.format(",\"Id solicitud\":\"%s\"", messageIdJson));
                         json.append("}");
-                        String messageId = messageIdJson.toString();
-                        return new AbstractMap.SimpleEntry<>(messageId, json.toString());
+                        return new AbstractMap.SimpleEntry<>(messageIdJson, json.toString());
                     })
                     .setName("Map String to JSON Object")
-                    .setLocalParallelism(1);
+                    .setLocalParallelism(1)
+                    .writeTo(KafkaSinks.kafka(producerProps(), "my_topic"));
+            HazelcastInstance hazelcastInstance = Hazelcast.bootstrappedInstance();
+            hazelcastInstance.getList("sourceList").clear(); // Limpiar lista
+            hazelcastInstance.getList("sourceList").add(pipelineMsg); // Agregar elemento a la lista
 
-            Properties kafkaProps = new Properties();
-            kafkaProps.put("bootstrap.servers", "localhost:9092");
-            kafkaProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-            kafkaProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-            jsonEntries.writeTo(KafkaSinks.kafka(kafkaProps,
-                    "my_topic"
-            ));
-            jsonEntries.writeTo(Sinks.observable("results"));
-            jsonEntries.writeTo(Sinks.logger());
-            jsonEntries.writeTo(Sinks.map("jsonMap"));
-
-
-
-            HazelcastInstance hz = Hazelcast.bootstrappedInstance();
-
-
-            hz.getList("sourceList").clear(); // Limpiar lista
-            hz.getList("sourceList").add(ocrResult); // Agregar elemento a la lista
-
-            Config jobConfig = new Config();
-            //jobConfig.getJetConfig().setResourceUploadEnabled(true);
-            jobConfig.getJetConfig().setEnabled(true);
-
-            //jobConfig.addClass(App.class);
-            hz.getJet().newJob(pipeline);
+            hazelcastInstance.getJet().newJob(pipeline);
 
         } catch (Exception e) {
             Logger.getLogger(App.class.getName()).severe("Error al ejecutar el pipeline: " + e.getMessage());
@@ -142,5 +119,11 @@ public class App {
         }
     }
 
-
+    private static Properties producerProps() {
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        return props;
+    }
 }
