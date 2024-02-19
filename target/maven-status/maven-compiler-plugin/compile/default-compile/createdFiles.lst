@@ -1,0 +1,4 @@
+com\inner\consulting\App.class
+com\inner\consulting\config\KafkaConfig.class
+com\inner\consulting\config\HazelcastConfig.class
+com\inner\consulting\service\PipelineService.class
